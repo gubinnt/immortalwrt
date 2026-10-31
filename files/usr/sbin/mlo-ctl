@@ -1,0 +1,196 @@
+#!/bin/sh
+# mlo-ctl - Spectrum SBE1V1K 多链路（MLO）开关
+#
+# 用法:
+#   mlo-ctl status        查看当前模式与运行状态
+#   mlo-ctl on            开启 2.4G + 5G 双频 MLO（6G 保持独立 AP）
+#   mlo-ctl on all        开启 2.4G + 5G + 6G 三频 MLO（6G 独立 AP 会消失）
+#   mlo-ctl off           关闭 MLO，恢复三个独立 AP
+#   mlo-ctl restore       从首次改动前的备份恢复无线配置
+#
+# 说明:
+#   - 切换后必须 reboot 生效（wifi reload 在多链路场景不可靠）
+#   - 首次执行 on 会自动备份 /etc/config/wireless 到 wireless.pre-mlo
+#   - 加密固定用 psk2：2.4/5G 链路对单链路老设备保留 WPA2-PSK，
+#     多链路关联自动使用 SAE，6G 链路强制 SAE
+
+CONF=/etc/config/wireless
+BAK=/etc/config/wireless.pre-mlo
+MLO_SSID="${MLO_SSID:-OWRT-MLO}"
+
+msg()  { echo "$@"; }
+err()  { echo "错误: $*" >&2; exit 1; }
+
+need_root() {
+	[ "$(id -u)" = "0" ] || err "需要 root 权限运行（请用 root 登录）"
+}
+
+backup_once() {
+	[ -f "$BAK" ] || cp "$CONF" "$BAK" || err "备份 $CONF 失败"
+}
+
+pick_key() {
+	k=$(uci -q get wireless.default_radio2.key)     # 5G
+	[ -n "$k" ] || k=$(uci -q get wireless.default_radio1.key)   # 6G
+	[ -n "$k" ] || k=$(uci -q get wireless.default_radio0.key)   # 2.4G
+	[ -n "$k" ] || k="12345678"
+	echo "$k"
+}
+
+do_status() {
+	msg "=== 配置模式 ==="
+	if uci -q get wireless.mlo >/dev/null 2>&1; then
+		msg "  MLO: 已开启"
+		msg "  SSID: $(uci -q get wireless.mlo.ssid)"
+		msg "  加密: $(uci -q get wireless.mlo.encryption)"
+		msg "  绑定: $(uci -q get wireless.mlo.device)"
+		n=$(uci -q get wireless.mlo.device | wc -w)
+		[ "$n" = "2" ] && msg "  类型: 双频（2.4G + 5G）" || msg "  类型: 三频（含 6G）"
+		[ "$(uci -q get wireless.mlo.disabled)" = "1" ] && msg "  注意: 当前为 disabled 状态"
+	else
+		msg "  MLO: 未开启（三个独立 AP）"
+	fi
+	if [ -f "$BAK" ]; then
+		msg "  备份: $BAK 存在"
+	else
+		msg "  备份: 无（尚未执行过 on）"
+	fi
+
+	msg ""
+	msg "=== 运行中的接口 ==="
+	found=0
+	for i in $(iw dev 2>/dev/null | grep Interface | awk '{print $2}'); do
+		found=1
+		s=$(iw dev "$i" info 2>/dev/null | grep ssid | awk '{print $2}')
+		c=$(iw dev "$i" info 2>/dev/null | grep -o 'channel [0-9]*' | head -1 | awk '{print $2}')
+		w=$(iw dev "$i" info 2>/dev/null | grep -o 'width: [0-9]* MHz' | head -1)
+		st=$(iw dev "$i" station dump 2>/dev/null | grep -c '^Station')
+		msg "  $i  ssid=${s:--}  ch=${c:--}  ${w:--}  客户端=$st"
+	done
+	[ "$found" = "0" ] && msg "  （无线未启动）"
+
+	msg ""
+	msg "=== MLO 链路成员 ==="
+	if iw dev ap-mld0 info >/dev/null 2>&1; then
+		iw dev ap-mld0 info 2>/dev/null | grep -E 'link ID|channel [0-9]+|width:' | sed 's/^/  /'
+		iw dev ap-mld0 info 2>/dev/null | grep -E 'Radios:' | sed 's/^/  /'
+	else
+		msg "  未建立 ap-mld0 接口"
+	fi
+
+	msg ""
+	msg "=== 当前客户端 ==="
+	any=0
+	for i in $(iw dev 2>/dev/null | grep Interface | awk '{print $2}'); do
+		dump=$(iw dev "$i" station dump 2>/dev/null | grep -E '^Station|signal:|tx bitrate:|rx bitrate:')
+		if [ -n "$dump" ]; then
+			any=1
+			msg "  [$i]"
+			echo "$dump" | sed 's/^/    /'
+		fi
+	done
+	[ "$any" = "0" ] && msg "  （无客户端关联）"
+}
+
+do_on() {
+	need_root
+	mode="$1"
+
+	if uci -q get wireless.mlo >/dev/null 2>&1; then
+		msg "MLO 已经开启，如需更换模式请先执行: mlo-ctl off"
+		exit 0
+	fi
+
+	backup_once
+	key=$(pick_key)
+
+	uci -q delete wireless.mlo
+	uci set wireless.mlo=wifi-iface
+	uci set wireless.mlo.mode='ap'
+	uci set wireless.mlo.ssid="$MLO_SSID"
+	uci set wireless.mlo.encryption='psk2'
+	uci set wireless.mlo.key="$key"
+	uci set wireless.mlo.network='lan'
+	uci set wireless.mlo.mlo='1'
+	uci set wireless.mlo.disabled='0'
+	uci add_list wireless.mlo.device='radio0'
+	uci add_list wireless.mlo.device='radio2'
+
+	uci set wireless.default_radio0.disabled='1'
+	uci set wireless.default_radio2.disabled='1'
+
+	if [ "$mode" = "all" ]; then
+		uci add_list wireless.mlo.device='radio1'
+		uci set wireless.default_radio1.disabled='1'
+		txt="三频 MLO（2.4G + 5G + 6G）"
+		note="6G 独立 AP（OWRT-6G）将消失"
+	else
+		uci set wireless.default_radio1.disabled='0'
+		txt="双频 MLO（2.4G + 5G）"
+		note="6G 保持独立 AP（OWRT-6G）"
+	fi
+
+	uci commit wireless || err "uci commit 失败"
+
+	msg "已启用 $txt"
+	msg "  SSID : $MLO_SSID"
+	msg "  密码 : $key（沿用原 5G 密码）"
+	msg "  说明 : $note"
+	msg ""
+	msg "执行 reboot 生效。若无线异常，可用网线登录后执行: mlo-ctl off && reboot"
+}
+
+do_off() {
+	need_root
+
+	if ! uci -q get wireless.mlo >/dev/null 2>&1; then
+		msg "MLO 当前未开启，无需操作"
+		exit 0
+	fi
+
+	uci -q delete wireless.mlo
+	uci set wireless.default_radio0.disabled='0'
+	uci set wireless.default_radio1.disabled='0'
+	uci set wireless.default_radio2.disabled='0'
+	uci commit wireless || err "uci commit 失败"
+
+	msg "已关闭 MLO，恢复三个独立 AP："
+	msg "  OWRT-2.4G / OWRT-6G / OWRT-5.2G"
+	msg ""
+	msg "执行 reboot 生效。"
+}
+
+do_restore() {
+	need_root
+	[ -f "$BAK" ] || err "没有找到备份 $BAK"
+	cp "$BAK" "$CONF" || err "恢复失败"
+	msg "已从 $BAK 恢复无线配置"
+	msg "执行 reboot 生效。"
+}
+
+usage() {
+	cat <<EOF
+mlo-ctl - SBE1V1K 多链路（MLO）开关
+
+用法:
+  mlo-ctl status      查看当前模式与运行状态
+  mlo-ctl on          开启 2.4G + 5G 双频 MLO（6G 保持独立 AP）
+  mlo-ctl on all      开启三频 MLO（2.4G + 5G + 6G，6G 独立 AP 消失）
+  mlo-ctl off         关闭 MLO，恢复三个独立 AP
+  mlo-ctl restore     从备份恢复无线配置
+
+提示:
+  - 切换后需 reboot 生效
+  - 加密固定 psk2：老设备走 WPA2-PSK，Wi-Fi 7 多链路走 SAE
+  - 若无线异常，用网线登录后 mlo-ctl off && reboot
+EOF
+}
+
+case "$1" in
+	status)  do_status ;;
+	on)      do_on "$2" ;;
+	off)     do_off ;;
+	restore) do_restore ;;
+	""|-h|--help|help) usage ;;
+	*)       err "未知参数 '$1'，执行 mlo-ctl 查看用法" ;;
+esac

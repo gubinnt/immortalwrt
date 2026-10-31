@@ -1,0 +1,23 @@
+From: Yang Zhengguo <yangzhgg@gmail.com>
+Date: Sat, 30 Aug 2026 00:00:00 +0800
+Subject: [PATCH] wifi: ath12k: add CV upload and Wi-Fi radar direct buffer ids
+
+QCN9274 firmware advertises direct-buffer module IDs 2
+(WMI_CONFIG_MODULE_CV_UPLOAD) and 3 (WMI_CONFIG_MODULE_WIFI_RADAR).
+Without the corresponding host enum values ath12k logs "ignoring
+unsupported dma ring module id 2/3" on every boot and rejects the
+service-ready capability, so the TLV parse stays incomplete.
+
+Add both IDs. Origins: Rajat Soni and Harish Rachakonda (Qualcomm),
+as carried by the SBE1V1K tree.
+
+--- a/drivers/net/wireless/ath/ath12k/wmi.h
++++ b/drivers/net/wireless/ath/ath12k/wmi.h
+@@ -2331,5 +2331,7 @@ enum wmi_direct_buffer_module {
+ 	WMI_DIRECT_BUF_SPECTRAL = 0,
+ 	WMI_DIRECT_BUF_CFR = 1,
++	WMI_DIRECT_BUF_CV_UPLOAD = 2,
++	WMI_CONFIG_MODULE_WIFI_RADAR = 3,
+ 
+ 	/* keep it last */
+ 	WMI_DIRECT_BUF_MAX

@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# 修正默认 APK 软件源：
+# 构建时 distfeeds.list 按 feeds.conf 生成，但 ImmortalWrt 官方 snapshot 只为
+# aarch64_cortex-a53 发布了 base / luci / packages / routing / telephony 五个 feed。
+# 本地 feeds.conf 里额外声明的 video / pon_drivers / pon_userspace 在上游并不存在，
+# 对应 URL 返回 404，会让 `apk update` 整体失败 —— 表现为 LuCI「软件包」页面报错、
+# 装不了任何插件。
+#
+# 本脚本在首次启动时剔除这些不可用的源，幂等，可重复执行。
+#
+
+F=/etc/apk/repositories.d/distfeeds.list
+[ -f "$F" ] || exit 0
+
+TMP="${F}.new"
+grep -vE '/(video|pon_drivers|pon_userspace)/packages\.adb$' "$F" > "$TMP" 2>/dev/null
+
+# 兜底：过滤后必须仍有可用条目，否则保持原样不动
+if [ -s "$TMP" ]; then
+	mv "$TMP" "$F"
+	logger -t apk-feeds "pruned unavailable feeds (video/pon_drivers/pon_userspace)"
+else
+	rm -f "$TMP"
+fi
+
+exit 0

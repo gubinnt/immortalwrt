@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+# 开机后自动把无线拉到可用状态（SBE1V1K 专用）
+# 放在 S95：LAN/WAN 已经起来，不阻塞有线；后台执行，不阻塞启动流程。
+
+START=95
+STOP=10
+USE_PROCD=0
+
+run() {
+	/usr/sbin/sbe-wifi-boot.sh &
+}
+
+boot() { run; }
+start() { run; }
+stop() { :; }

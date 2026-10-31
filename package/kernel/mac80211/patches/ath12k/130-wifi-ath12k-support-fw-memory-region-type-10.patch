@@ -1,0 +1,25 @@
+From: Jackie Han <jackie.han@gmail.com>
+Date: Sat, 12 Sep 2026 08:30:00 +0800
+Subject: [PATCH] wifi: ath12k: accept firmware memory region type 10
+
+QCN9274 firmware on the SBE1V1K asks the host to allocate a memory region
+whose QMI type is 10. The known enum stops at PAGEABLE (9), so every radio
+falls into the default branch: it logs "memory type 10 not supported" and
+hands the firmware a chunk with paddr 0 and addr NULL.
+
+Treat the region like the other host-allocated chunks so the firmware gets
+real memory. The size comes from the firmware request and is accounted
+against CMA as usual.
+
+Origins: Jackie Han, as carried by the SBE1V1K tree.
+
+--- a/drivers/net/wireless/ath/ath12k/qmi.c
++++ b/drivers/net/wireless/ath/ath12k/qmi.c
+@@ -2651,6 +2651,7 @@
+ 		case PAGEABLE_MEM_REGION_TYPE:
+ 		case CALDB_MEM_REGION_TYPE:
+ 		case LPASS_SHARED_V01_REGION_TYPE:
++		case 10: /* FW region used by WLAN.WBE.1.6 on QCN9274 */
+ 			ret = ath12k_qmi_alloc_chunk(ab, chunk);
+ 			if (ret)
+ 				goto err;

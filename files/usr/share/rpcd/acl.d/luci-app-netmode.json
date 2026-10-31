@@ -1,0 +1,15 @@
+{
+	"luci-app-netmode": {
+		"description": "Run mode switch (router / AP)",
+		"read": {
+			"file": {
+				"/usr/sbin/netmode": [ "exec" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/sbin/netmode": [ "exec" ]
+			}
+		}
+	}
+}

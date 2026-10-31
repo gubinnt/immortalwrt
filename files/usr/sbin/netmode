@@ -1,0 +1,162 @@
+#!/bin/sh
+# netmode - SBE1V1K 路由模式 / AP 模式切换
+#
+# 用法:
+#   netmode status      查看当前模式与网络概况
+#   netmode router      切换为路由模式（wan 独立，lan 192.168.2.1，开 DHCP）
+#   netmode ap          切换为 AP 模式（wan 并入 br-lan，lan 从上级拿地址，关 DHCP）
+#
+# 说明:
+#   本机是 DSA 架构，网口名为 lan1/lan2/lan3 + wan（RTL8261BE 10G）。
+#   AP 模式把 wan 也桥进 br-lan，等于把 10G 口当普通 LAN 口用；
+#   此时设备退化为二层接入点，由上级路由分配地址。
+#
+# 安全:
+#   切换前自动备份到 /etc/config/netmode.bak.<mode>.<时间戳>
+#   切换后 network 会重启，当前 SSH/网页连接可能中断，属正常现象。
+
+set -e
+BACKUP_DIR=/etc/config
+TS=$(date +%Y%m%d-%H%M%S)
+
+log()  { echo "[netmode] $*"; }
+die()  { echo "[netmode] ERROR: $*" >&2; exit 1; }
+
+# ---- 找到 br-lan 对应的 device section ----
+find_br() {
+    uci show network 2>/dev/null \
+        | grep -E "\.name='br-lan'" \
+        | head -1 \
+        | cut -d. -f2
+}
+
+# ---- 判断当前模式 ----
+cur_mode() {
+    local br
+    br=$(find_br)
+    [ -z "$br" ] && { echo unknown; return; }
+
+    if uci get network.$br.ports 2>/dev/null | grep -qw wan; then
+        echo ap
+    else
+        echo router
+    fi
+}
+
+backup_cfg() {
+    local tag=$1
+    cp -f /etc/config/network "$BACKUP_DIR/network.netmode-$tag-$TS" 2>/dev/null || true
+    cp -f /etc/config/dhcp    "$BACKUP_DIR/dhcp.netmode-$tag-$TS"    2>/dev/null || true
+    log "备份: $BACKUP_DIR/network.netmode-$tag-$TS"
+}
+
+# ================= status =================
+do_status() {
+    local br mode
+    br=$(find_br)
+    mode=$(cur_mode)
+
+    echo "模式      : $mode"
+    echo "br-lan    : ${br:-<未找到>}"
+    [ -n "$br" ] && echo "桥接端口  : $(uci get network.$br.ports 2>/dev/null | tr '\n' ' ')"
+    echo "lan proto : $(uci get network.lan.proto 2>/dev/null)"
+    echo "lan 地址  : $(uci get network.lan.ipaddr 2>/dev/null)"
+    echo "wan proto : $(uci get network.wan.proto 2>/dev/null || echo '<未配置>')"
+    echo "DHCP 服务 : $([ "$(uci get dhcp.lan.ignore 2>/dev/null)" = "1" ] && echo 关闭 || echo 开启)"
+    echo ""
+    echo "当前地址  :"
+    ip -4 addr show br-lan 2>/dev/null | grep inet | sed 's/^/  /' || echo "  <无>"
+}
+
+# ================= router =================
+do_router() {
+    local br
+    br=$(find_br)
+    [ -z "$br" ] && die "找不到 br-lan 设备段，配置结构异常"
+
+    [ "$(cur_mode)" = "router" ] && { log "已经是路由模式，无需切换"; do_status; exit 0; }
+
+    backup_cfg router
+
+    log "1/5 从 br-lan 移除 wan"
+    uci del_list network.$br.ports='wan' 2>/dev/null || true
+
+    log "2/5 恢复 lan 为静态 192.168.2.1/24"
+    uci set network.lan.proto='static'
+    uci set network.lan.ipaddr='192.168.2.1'
+    uci set network.lan.netmask='255.255.255.0'
+
+    log "3/5 建立 wan 接口（DHCP 客户端）"
+    uci set network.wan='interface'
+    uci set network.wan.device='wan'
+    uci set network.wan.proto='dhcp'
+    uci set network.wan.peerdns='1'
+    uci set network.wan.auto='1'
+
+    log "4/5 开启 lan DHCP 服务"
+    uci set dhcp.lan.ignore='0'
+    uci set dhcp.lan.start='100'
+    uci set dhcp.lan.limit='150'
+    uci set dhcp.lan.leasetime='12h'
+
+    log "5/5 提交并重启网络"
+    uci commit network
+    uci commit dhcp
+    /etc/init.d/network restart
+    /etc/init.d/dnsmasq restart 2>/dev/null || true
+
+    log "完成 → 路由模式"
+    log "管理地址: http://192.168.2.1"
+}
+
+# ================= ap =================
+do_ap() {
+    local br
+    br=$(find_br)
+    [ -z "$br" ] && die "找不到 br-lan 设备段，配置结构异常"
+
+    [ "$(cur_mode)" = "ap" ] && { log "已经是 AP 模式，无需切换"; do_status; exit 0; }
+
+    backup_cfg ap
+
+    log "1/5 把 wan 桥进 br-lan（10G 口当 LAN 用）"
+    uci add_list network.$br.ports='wan'
+
+    log "2/5 删除独立的 wan 接口"
+    uci delete network.wan 2>/dev/null || true
+
+    log "3/5 lan 改为 DHCP 客户端（从上级路由取地址）"
+    uci set network.lan.proto='dhcp'
+    uci delete network.lan.ipaddr 2>/dev/null || true
+    uci delete network.lan.netmask 2>/dev/null || true
+    uci delete network.lan.gateway 2>/dev/null || true
+    uci delete network.lan.dns 2>/dev/null || true
+
+    log "4/5 关闭 lan DHCP 服务（避免与上级冲突）"
+    uci set dhcp.lan.ignore='1'
+
+    log "5/5 提交并重启网络"
+    uci commit network
+    uci commit dhcp
+    /etc/init.d/network restart
+    /etc/init.d/dnsmasq restart 2>/dev/null || true
+
+    log "完成 → AP 模式"
+    log "设备将从上级路由获取地址，请在上级路由的客户端列表里找它的新 IP"
+    log "若拿不到地址，用串口或直接在浏览器访问 http://192.168.2.1 应急"
+}
+
+# ================= main =================
+case "${1:-status}" in
+    status|st)  do_status ;;
+    router|rt)  do_router ;;
+    ap)         do_ap ;;
+    *)
+        echo "用法: netmode [status|router|ap]"
+        echo ""
+        echo "  status   查看当前模式"
+        echo "  router   路由模式（wan 独立拨号/DHCP，lan 192.168.2.1，开 DHCP）"
+        echo "  ap       AP 模式（wan 并入 br-lan，lan 从上级拿地址，关 DHCP）"
+        exit 1
+        ;;
+esac

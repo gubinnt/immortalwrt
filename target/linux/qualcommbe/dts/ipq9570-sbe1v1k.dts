@@ -153,6 +153,27 @@
 	status = "okay";
 };
 
+&rpm_requests {
+	regulators {
+		/* l5 removed: RPM firmware on this board does not expose LDOA5.
+		 * Enabling it returns -ENXIO and aborts the whole regulator probe,
+		 * dragging s1 down with it and leaving cpufreq without cpu-supply.
+		 * s1/s2 values follow the vendor dtb dumped from HLOS_1.
+		 */
+		s1 {
+			regulator-min-microvolt = <587500>;
+			regulator-max-microvolt = <1075000>;
+			regulator-always-on;
+		};
+
+		ipq9574_s2: s2 {
+			regulator-min-microvolt = <700000>;
+			regulator-max-microvolt = <1000000>;
+			regulator-always-on;
+		};
+	};
+};
+
 &sdhc_1 {
 	#address-cells = <1>;
 	#size-cells = <0>;
@@ -436,16 +457,22 @@
 	qcom,calibration-variant = "Askey-SBE1V1K_1";
 	nvmem-cells = <&ethaddr (-3)>;
 	nvmem-cell-names = "mac-address";
+	/* only one PHY is wired per QCN9274 on this board */
+	qcom,num-radios = <1>;
 };
 
 &wifi2 {
 	qcom,calibration-variant = "Askey-SBE1V1K_4";
 	nvmem-cells = <&ethaddr (-1)>;
 	nvmem-cell-names = "mac-address";
+	/* only one PHY is wired per QCN9274 on this board */
+	qcom,num-radios = <1>;
 };
 
 &wifi3 {
 	qcom,calibration-variant = "Askey-SBE1V1K_2";
 	nvmem-cells = <&ethaddr (-2)>;
 	nvmem-cell-names = "mac-address";
+	/* only one PHY is wired per QCN9274 on this board */
+	qcom,num-radios = <1>;
 };
